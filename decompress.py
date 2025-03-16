@@ -6,7 +6,7 @@ from front_month_validator import FrontMonthValidator
 
 def decompress_to_sqlite(zst_file, db_file):
     """
-    Decompress a .zst file and load front-month NQ futures data into an SQLite database,
+    Decompress DataBento's futures OHLCV .zst file and load front-month NQ futures data into an SQLite database,
     using the FrontMonthValidator to check if a record is for the front-month contract.
     """
     conn = sqlite3.connect(db_file)
