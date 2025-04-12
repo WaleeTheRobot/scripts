@@ -2,22 +2,27 @@ import sqlite3
 import zstandard as zstd
 import io
 from front_month_validator import FrontMonthValidator
-
+from dateutil.parser import isoparse
+import pytz
 
 def decompress_to_sqlite(zst_file, db_file):
     """
     Decompress DataBento's futures OHLCV .zst file and load front-month NQ futures data into an SQLite database,
     using the FrontMonthValidator to check if a record is for the front-month contract.
+    Only selected fields (timestamp, open, high, low, close, volume, symbol) are written into the database.
+    The timestamp is converted from UTC to Eastern Time (ET) with the correct offset for EST/EDT.
+    
+    Args:
+        zst_file (str): Path to the .zst compressed file.
+        db_file (str): Path to the SQLite database file.
     """
     conn = sqlite3.connect(db_file)
     c = conn.cursor()
 
+    # Create table if it doesn't exist
     c.execute('''
         CREATE TABLE IF NOT EXISTS data (
-            ts_event TEXT,
-            rtype INTEGER,
-            publisher_id INTEGER,
-            instrument_id INTEGER,
+            timestamp TEXT,
             open REAL,
             high REAL,
             low REAL,
@@ -29,41 +34,42 @@ def decompress_to_sqlite(zst_file, db_file):
 
     insert_sql = """
         INSERT INTO data (
-            ts_event, rtype, publisher_id, instrument_id,
-            open, high, low, close, volume, symbol
+            timestamp, open, high, low, close, volume, symbol
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
     """
 
+    # Define Eastern Time zone (handles EST/EDT automatically)
+    eastern = pytz.timezone('US/Eastern')
+
+    # Open and decompress the .zst file
     with open(zst_file, 'rb') as f:
         dctx = zstd.ZstdDecompressor()
         with dctx.stream_reader(f) as reader:
             text_stream = io.TextIOWrapper(reader, encoding='utf-8')
 
-            # If CSV has a header line, skip it:
+            # Skip the header line
             text_stream.readline()
 
+            # Process each line
             for line in text_stream:
                 line = line.strip()
                 if not line:
                     continue
 
-                # Ensure we have exactly 10 comma-separated fields
+                # Split line into fields and verify it has exactly 10 columns
                 parts = line.split(',')
                 if len(parts) != 10:
                     print("Skipping line with unexpected number of columns:", line)
                     continue
 
-                # Use FrontMonthValidator to check the row
+                # Filter for front-month contracts
                 validator = FrontMonthValidator(line)
                 if not validator.is_valid_front_month():
                     continue
 
                 try:
                     dt = parts[0]
-                    rtype = int(parts[1])
-                    publisher_id = int(parts[2])
-                    instrument_id = int(parts[3])
                     open_price = float(parts[4])
                     high_price = float(parts[5])
                     low_price = float(parts[6])
@@ -71,10 +77,16 @@ def decompress_to_sqlite(zst_file, db_file):
                     volume = int(parts[8])
                     symbol = parts[9]
 
+                    # Parse UTC timestamp
+                    dt_utc = isoparse(dt)
+                    # Convert to Eastern Time
+                    dt_eastern = dt_utc.astimezone(eastern)
+                    # Format with correct offset (e.g., -0500 or -0400)
+                    dt_eastern_str = dt_eastern.strftime("%Y-%m-%dT%H:%M:%S.%f")[:26] + dt_eastern.strftime("%z")
+
                     c.execute(insert_sql, (
-                        dt, rtype, publisher_id, instrument_id,
-                        open_price, high_price, low_price, close_price,
-                        volume, symbol
+                        dt_eastern_str, open_price, high_price, low_price,
+                        close_price, volume, symbol
                     ))
                 except Exception as e:
                     print(f"Error processing line: {line}, Error: {e}")
@@ -83,7 +95,5 @@ def decompress_to_sqlite(zst_file, db_file):
     conn.close()
     print("Front-month data loaded into SQLite database successfully.")
 
-
 if __name__ == '__main__':
-    # Modify the paths and db file as needed
     decompress_to_sqlite('nq-csv/data.zst', 'data.db')
